@@ -1,0 +1,160 @@
+--- a/net/mac80211/tx.c
++++ b/net/mac80211/tx.c
+@@ -1685,14 +1685,13 @@
+ 	int ret = ieee80211_radiotap_iterator_init(&iterator, rthdr, skb->len,
+ 						   NULL);
+ 	u16 txflags;
+-	u16 rate = 0;
+-	bool rate_found = false;
+-	u8 rate_retries = 0;
+-	u16 rate_flags = 0;
++	u8 fixed_rate[IEEE80211_TX_MAX_RATES] = { -1 };
++	u8 fixed_rate_data_retries[IEEE80211_TX_MAX_RATES] = { 0 };
++	u16 fixed_rate_flags[IEEE80211_TX_MAX_RATES] = { 0 };
+ 	u8 mcs_known, mcs_flags, mcs_bw;
+-	u16 vht_known;
+-	u8 vht_mcs = 0, vht_nss = 0;
+ 	int i;
++	u8 idx_rate = 0;
++	u8 idx_retries = 0;
+ 
+ 	info->flags |= IEEE80211_TX_INTFL_DONT_ENCRYPT |
+ 		       IEEE80211_TX_CTL_DONTFRAG;
+@@ -1744,13 +1743,13 @@
+ 			break;
+ 
+ 		case IEEE80211_RADIOTAP_RATE:
+-			rate = *iterator.this_arg;
+-			rate_flags = 0;
+-			rate_found = true;
++			fixed_rate[idx_rate] = *iterator.this_arg;
++			idx_rate++;
+ 			break;
+ 
+ 		case IEEE80211_RADIOTAP_DATA_RETRIES:
+-			rate_retries = *iterator.this_arg;
++			fixed_rate_data_retries[idx_retries] = *iterator.this_arg;
++			idx_retries++;
+ 			break;
+ 
+ 		case IEEE80211_RADIOTAP_MCS:
+@@ -1759,44 +1758,19 @@
+ 			if (!(mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_MCS))
+ 				break;
+ 
+-			rate_found = true;
+-			rate = iterator.this_arg[2];
+-			rate_flags = IEEE80211_TX_RC_MCS;
++			fixed_rate[idx_rate] = iterator.this_arg[2];
++			fixed_rate_flags[idx_rate] |= IEEE80211_TX_RC_MCS;
+ 
+ 			if (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_GI &&
+ 			    mcs_flags & IEEE80211_RADIOTAP_MCS_SGI)
+-				rate_flags |= IEEE80211_TX_RC_SHORT_GI;
++				fixed_rate_flags[idx_rate] |= IEEE80211_TX_RC_SHORT_GI;
+ 
+ 			mcs_bw = mcs_flags & IEEE80211_RADIOTAP_MCS_BW_MASK;
+ 			if (mcs_known & IEEE80211_RADIOTAP_MCS_HAVE_BW &&
+ 			    mcs_bw == IEEE80211_RADIOTAP_MCS_BW_40)
+-				rate_flags |= IEEE80211_TX_RC_40_MHZ_WIDTH;
+-			break;
+-
+-		case IEEE80211_RADIOTAP_VHT:
+-			vht_known = get_unaligned_le16(iterator.this_arg);
+-			rate_found = true;
+-
+-			rate_flags = IEEE80211_TX_RC_VHT_MCS;
+-			if ((vht_known & IEEE80211_RADIOTAP_VHT_KNOWN_GI) &&
+-			    (iterator.this_arg[2] &
+-			     IEEE80211_RADIOTAP_VHT_FLAG_SGI))
+-				rate_flags |= IEEE80211_TX_RC_SHORT_GI;
+-			if (vht_known &
+-			    IEEE80211_RADIOTAP_VHT_KNOWN_BANDWIDTH) {
+-				if (iterator.this_arg[3] == 1)
+-					rate_flags |=
+-						IEEE80211_TX_RC_40_MHZ_WIDTH;
+-				else if (iterator.this_arg[3] == 4)
+-					rate_flags |=
+-						IEEE80211_TX_RC_80_MHZ_WIDTH;
+-				else if (iterator.this_arg[3] == 11)
+-					rate_flags |=
+-						IEEE80211_TX_RC_160_MHZ_WIDTH;
+-			}
++				fixed_rate_flags[idx_rate] |= IEEE80211_TX_RC_40_MHZ_WIDTH;
+ 
+-			vht_mcs = iterator.this_arg[4] >> 4;
+-			vht_nss = iterator.this_arg[4] & 0xF;
++			idx_rate++;			
+ 			break;
+ 
+ 		/*
+@@ -1813,38 +1787,44 @@
+ 	if (ret != -ENOENT) /* ie, if we didn't simply run out of fields */
+ 		return false;
+ 
+-	if (rate_found) {
+-		info->control.flags |= IEEE80211_TX_CTRL_RATE_INJECT;
++	struct ieee80211_tx_rate *rates = info->control.rates;
+ 
+-		for (i = 0; i < IEEE80211_TX_MAX_RATES; i++) {
+-			info->control.rates[i].idx = -1;
+-			info->control.rates[i].flags = 0;
+-			info->control.rates[i].count = 0;
++	for (i = 0; i < IEEE80211_TX_MAX_RATES; i++) {
++		if (fixed_rate[i] == -1) {
++			int j;			
++			for (j = i; j < IEEE80211_TX_MAX_RATES; j++) {
++				rates[i].idx = -1;
++				rates[i].count = 0;
++				rates[i].flags = 0;
++			}
++			break;
+ 		}
+-
+-		if (rate_flags & IEEE80211_TX_RC_MCS) {
+-			info->control.rates[0].idx = rate;
+-		} else if (rate_flags & IEEE80211_TX_RC_VHT_MCS) {
+-			ieee80211_rate_set_vht(info->control.rates, vht_mcs,
+-					       vht_nss);
++		if (fixed_rate_flags[i] & IEEE80211_TX_RC_MCS) {
++			WARN_ON(!sband->ht_cap.ht_supported);
++			rates[i].idx = fixed_rate[i];
+ 		} else {
+-			for (i = 0; i < sband->n_bitrates; i++) {
+-				if (rate * 5 != sband->bitrates[i].bitrate)
+-					continue;
+-
+-				info->control.rates[0].idx = i;
+-				break;
++			/* convert legacy rate; NB: .5 Mb/s -> 100 kb/s */
++			int bitrate = fixed_rate[i]*5;
++			rates[i].idx = -1;  /* default to no rate */
++			int j;
++			for (j = 0; j < sband->n_bitrates; j++) {
++				if (bitrate == sband->bitrates[j].bitrate) {
++					rates[i].idx = j;
++					break;
++				}
+ 			}
+ 		}
+-
+-		if (info->control.rates[0].idx < 0)
+-			info->control.flags &= ~IEEE80211_TX_CTRL_RATE_INJECT;
+-
+-		info->control.rates[0].flags = rate_flags;
+-		info->control.rates[0].count = min_t(u8, rate_retries + 1,
+-						     local->hw.max_rate_tries);
++		if (rates[i].idx != -1) {
++			rates[i].count = fixed_rate_data_retries[i] + 1;
++			if (rates[i].count > local->hw.max_rate_tries) {
++				rates[i].count = local->hw.max_rate_tries;
++			}
++			rates[i].flags = fixed_rate_flags[i];
++		}
+ 	}
+ 
++	info->control.flags |= IEEE80211_TX_CTRL_RATE_INJECT;
++
+ 	/*
+ 	 * remove the radiotap header
+ 	 * iterator->_max_length was sanity-checked against
