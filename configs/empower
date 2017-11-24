@@ -1,0 +1,6 @@
+config empower general
+    option "master_ip" "192.168.0.1"
+    option "master_port" "4433"
+    option "network" "lan"
+    list "ifname" "empower0"
+    list "debugfs" "/sys/kernel/debug/ieee80211/phy0/ath9k/bssid_extra"

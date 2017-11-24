@@ -19,4 +19,8 @@ cp patches/906-multi_rate_retry_chain.patch "$LEDE_BASEDIR"/package/kernel/mac80
 cp profiles/200-Empower.mk "$LEDE_BASEDIR"/target/linux/x86/geode/profiles/
 cp profiles/100-APU-Empower.mk "$LEDE_BASEDIR"/target/linux/x86/64/profiles/
 
+# copy over config files
+mkdir -p "$LEDE_BASEDIR"/files/etc/config
+cp configs/* "$LEDE_BASEDIR"/files/etc/config/
+
 echo "Prepared source, continue with adding and installing feeds, make menuconfig, make"
